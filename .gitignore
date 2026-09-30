@@ -1,0 +1,24 @@
+# Python virtual environment
+.venv/
+
+# Python cache files
+__pycache__/
+*.py[cod]
+
+# Jupyter temporary files
+.ipynb_checkpoints/
+
+# VS Code project-specific settings
+.vscode/
+
+# Operating system files
+.DS_Store
+Thumbs.db
+
+# Generated trained models
+results/models/*
+!results/models/.gitkeep
+
+# Raw biological sequence data
+data/raw/*
+!data/raw/.gitkeep
