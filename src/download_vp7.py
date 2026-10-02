@@ -1,9 +1,6 @@
-from Bio import Entrez
-from Bio import SeqIO
-from pathlib import Path
+from Bio import Entrez, SeqIO
 import re
 import pandas as pd
-import time
 
 Entrez.email = "stampwberth.1@osu.edu"
 
