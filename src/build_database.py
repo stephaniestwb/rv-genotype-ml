@@ -4,6 +4,7 @@ import pandas as pd
 import re
 import time
 from sequence_qc import check_sequence
+from collections import Counter
 
 from vp7_parser import parse_record, get_vp7_cds
 
@@ -52,30 +53,259 @@ def fetch_accessions(webenv, query_key, count):
     accessions = []
 
     for start in range(0, count, batch_size):
-        current_batch_size = min(batch_size, count - start)
-        with Entrez.efetch(
+        current_batch_size = min(
+            batch_size,
+            count - start
+        )
+
+        with Entrez.esummary(
             db = "nucleotide",
-            rettype = "acc",
-            retmode = "text",
-            retstart = 0,
-            retmax = count,
+            retstart = start,
+            retmax = current_batch_size,
+            retmode = "xml",
             webenv = webenv,
             query_key = query_key
         ) as handle:
-            batch_accessions = handle.read().splitlines()
+            results = Entrez.read(handle)
+
+        batch_accessions = [
+            record["AccessionVersion"]
+            for record in results
+        ]
 
         if len(batch_accessions) != current_batch_size:
             raise RuntimeError(
-                f"Expected {current_batch_size} accessions "
+                f"Expected {current_batch_size} accessions"
                 f"at position {start}, "
                 f"but received {len(batch_accessions)}."
-            ) 
+            )
 
         accessions.extend(batch_accessions)
-        print(
-            f"Retrieved {len(accessions)} "
-            f"of {count} accessions."
+
+        print(f"Retrieved {len(accessions)} of {count} accessions.")
+
+        time.sleep(0.4)
+
+    return accessions
+
+def save_manifest(accessions):
+    """Save and validate the accession manifest."""
+
+    manifest_file = raw_dir / "accession_manifest.txt"
+
+    if len(accessions) != len(set(accessions)):
+        raise ValueError(
+            "Duplicate accessions found in the manifest."
         )
+
+    with open(manifest_file, "w") as handle:
+        
+        for accession in accessions:
+            handle.write(f"{accession}\n")
+
+    print(f"\nSaved {len(accessions)} accessions.")
+    print(f"Manifest: {manifest_file}")
+    
+    return manifest_file
+
+def load_manifest():
+    """Load the saved accession manifest."""
+
+    manifest_file = raw_dir / "accession_manifest.txt"
+
+    with open(manifest_file, "r") as handle:
+        accessions = [
+            line.strip()
+            for line in handle
+            if line.strip()
+        ]
+
+    return accessions
+
+def compare_existing_records(accessions, records):
+    """Compare downloaded records agains the manifest"""
+
+    manifest_set = set(accessions)
+
+    downloaded_set = {
+        record.id
+        for record in records
+    }
+
+    existing = manifest_set & downloaded_set
+    missing = manifest_set - downloaded_set
+    outdated = downloaded_set - manifest_set
+
+    print("\nAccession comparison:")
+    print(f"Manifest accessions: {len(manifest_set)}")
+    print(f"Downloaded accessions: {len(downloaded_set)}")
+    print(f"Already available: {len(existing)}")
+    print(f"Still missing: {len(missing)}")
+    print(f"Not in manifest: {len(outdated)}")
+
+    return existing, missing, outdated
+
+def fetch_records_by_accession(accessions):
+    """Retrieve GenBank records using accession numbers."""
+
+    with Entrez.efetch(
+        db = "nucleotide",
+        id = ",".join(accessions),
+        rettype = "gb",
+        retmode = "text"
+    ) as handle:
+
+        records = list(SeqIO.parse(handle, "genbank"))
+
+    return records
+
+def fetch_with_retries(accessions, max_attempts = 3):
+    """Retrieve records, retrying after temporary failures."""
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            records = fetch_records_by_accession(accessions)
+
+            requested = set(accessions)
+            returned = [record.id for record in records]
+
+            if (
+                len(returned) != len(requested)
+                or set(returned) != requested
+            ):
+                raise RuntimeError(
+                    "Returned accessions do not match the request."
+                )
+
+            return records
+
+        except Exception as error:
+            print(
+                f"Attempt {attempt}/{max_attempts} "
+                f"failed: {error}"
+            )
+
+            if attempt == max_attempts:
+                raise
+
+            wait_time = 2 ** attempt
+
+            print(f"Retrying in {wait_time} seconds...")
+            time.sleep(wait_time)
+
+def download_missing_records(missing, max_batches = None):
+    """Download missing GenBank records in validated batches."""
+
+    missing_accessions = sorted(missing)
+
+    total = len(missing_accessions)
+
+    existing_batches = list(
+        raw_dir.glob("accession_batch_*.gb")
+    )
+
+    next_batch_number = max(
+        (
+            int(path.stem.split("_")[-1])
+            for path in existing_batches
+        ),
+        default = -1
+    ) + 1
+
+    print(f"Next batch number: {next_batch_number}")
+
+    print(f"\nDownloading {total} missing records...")
+
+    for start in range(0, total, batch_size):
+        batch_index = start // batch_size
+
+        if max_batches is not None and batch_index >= max_batches:
+            break
+
+        batch_number = next_batch_number + batch_index
+
+        batch_accessions = missing_accessions[
+            start:start + batch_size
+        ]
+
+        print(
+            f"\nBatch {batch_number + 1}: "
+            f"requesting {len(batch_accessions)} records..."
+        )
+
+        records = fetch_with_retries(
+            batch_accessions
+        )
+
+        requested = set(batch_accessions)
+
+        returned = [record.id for record in records]
+
+        if (
+            len(returned) != len(requested)
+            or set(returned) != requested
+        ): 
+            raise RuntimeError(
+                f"Batch {batch_number + 1} validation failed."
+            )
+
+        batch_file = raw_dir / (
+            f"accession_batch_{batch_number:05d}.gb"
+        )
+
+        if batch_file.exists():
+            raise FileExistsError(
+                f"Refusing to overwrite {batch_file}"
+            )
+
+        temporary_file = batch_file.with_suffix(".gb.tmp")
+
+        with open(temporary_file, "w") as handle:
+            SeqIO.write(records, handle, "genbank")
+
+        temporary_file.replace(batch_file)
+
+        print(
+            f"Saved {len(records)} records "
+            f"to {batch_file}"  
+        )
+
+        time.sleep(0.4)
+
+    print("\nDownload run completed.")
+
+def test_accession_boundary(webenv, query_key, count):
+    """Test accession retrieval near the 10,000-record boundary"""
+
+    start = 9900
+
+    current_batch_size = min(200, count - start)
+
+    print(
+        f"\nTesting retrieval at position {start} "
+        f"for {current_batch_size} records..."
+    )
+
+    with Entrez.esummary(
+        db = "nucleotide",
+        webenv = webenv,
+        query_key = query_key,
+        retstart = start,
+        retmax = current_batch_size,
+        retmode = "xml"
+    ) as handle:
+        results = Entrez.read(handle)
+
+    accessions = [
+        record["AccessionVersion"]
+        for record in results
+    ]
+
+    print(f"Retrieved {len(accessions)} accessions.")
+
+    if accessions:
+        print(f"First accession: {accessions[0]}")
+        print(f"Last accession: {accessions[-1]}")
 
     return accessions
 
@@ -145,7 +375,10 @@ def load_batches():
 
     records = []
 
-    batch_files = sorted(raw_dir.glob("batch_*.gb"))
+    batch_files = sorted(
+        list(raw_dir.glob("batch_*.gb"))
+        + list(raw_dir.glob("accession_batch_*.gb"))
+        )
 
     for batch_file in batch_files:
         print(f"Loading {batch_file}...")
@@ -159,168 +392,223 @@ def load_batches():
 
     return records
 
+def validate_database(accessions, records):
+    """Validate downloaded records against the manifest."""
+
+    manifest_set = set(accessions)
+
+    record_ids = [record.id for record in records]
+    downloaded_set = set(record_ids)
+
+    counts = Counter(record_ids)
+
+    duplicates = {
+        accession: count
+        for accession, count in counts.items()
+        if count > 1
+    }
+
+    missing = manifest_set - downloaded_set
+    unexpected = downloaded_set - manifest_set
+
+    print("\nDatabase integrity report:")
+    print(f"Manifest entries {len(accessions)}")
+    print(f"Loaded records: {len(records)}")
+    print(f"Unique records: {len(downloaded_set)}")
+    print(f"Duplicate accessions: {len(duplicates)}")
+    print(f"Missing accessions: {len(missing)}")
+    print(f"Unexpected accessions: {len(unexpected)}")
+
+    assert len(accessions) == len(manifest_set)
+    assert len(records) == len(accessions)
+    assert not duplicates
+    assert not missing
+    assert not unexpected
+
+    print("\nDatabase integrity check passed.")
+
 if __name__ == "__main__":
-    count, webenv, query_key = search_ncbi(query)
+    # count, webenv, query_key = search_ncbi(query)
 
-    download_all(
-        webenv = webenv,
-        query_key = query_key,
-        count = 400,
-    )
+    accessions = load_manifest()
 
-    accessions = fetch_accessions(
-        webenv = webenv,
-        query_key = query_key,
-        count = count
-    )
-
-    assert len(accessions) == count
-    assert len(accessions) == len(set(accessions))
-
-    print("\nAccession list validation passed.")
-
-    print("\nFirst five accessions:")
-    for accession in accessions[:5]:
-        print(accession)
     records = load_batches()
 
-print("\nParsing downloaded records...")
+    validate_database(
+        accessions,
+        records
+    )
 
-rows = []
+    # existing, missing, outdated = compare_existing_records(
+    #     accessions,
+    #     records
+    # )
 
-for record in records:
+    # assert len(records) == len(existing)
+    # assert len(existing) + len(missing) == len(accessions)
+    # assert len(outdated) == 0
+    
+    # download_missing_records(missing)
 
-    metadata = parse_record(record)
+#     download_all(
+#         webenv = webenv,
+#         query_key = query_key,
+#         count = 400,
+#     )
 
-    vp7_cds = get_vp7_cds(record)
+    # accessions = fetch_accessions(
+    #     webenv = webenv,
+    #     query_key = query_key,
+    #     count = count
+    # )
 
-    if vp7_cds is not None:
-        qc_metrics = check_sequence(vp7_cds)
-        metadata.update(qc_metrics)
+    # assert len(accessions) == count
+    # manifest_file = save_manifest(accessions)
 
-    rows.append(metadata)
+    # print("\nManifest creation completed.")
 
-df = pd.DataFrame(rows)
+#     print("\nFirst five accessions:")
+#     for accession in accessions[:5]:
+#         print(accession)
+#     records = load_batches()
 
-print("\nQC review summary:")
-print(df["qc_review"].value_counts())
+# print("\nParsing downloaded records...")
 
-print("\nRecords requiring QC review:")
-print(
-    df[df["qc_review"] == True][
-        [
-            "accession",
-            "genotype",
-            "sequence_length",
-            "ambiguous_count",
-            "frame_valid",
-            "status"       
-        ]
-    ].to_string(index = False)
-)
+# rows = []
 
-print("\nSequence QC summary:")
-print(
-    df[
-        [
-            "sequence_length",
-            "ambiguous_count",
-            "ambiguous_fraction",
-            "frame_valid"
-        ]
-    ].describe(include = "all")
-)
+# for record in records:
 
-print("\nSequences containing ambiguoous nucleotides:")
-print(
-    df[df["ambiguous_count"] > 0][
-        ["accession", "genotype", "ambiguous_count"]
-    ].to_string(index = False)
-)
+#     metadata = parse_record(record)
 
-print(
-    df[df["frame_valid"] == False][
-        ["accession", "genotype", "sequence_length"]
-    ].to_string(index = False)
-)
+#     vp7_cds = get_vp7_cds(record)
 
-print("\nRecord status:")
-print(df["status"].value_counts())
+#     if vp7_cds is not None:
+#         qc_metrics = check_sequence(vp7_cds)
+#         metadata.update(qc_metrics)
 
-print("\nGenotype distribution:")
-print(df["genotype"].value_counts())
+#     rows.append(metadata)
 
-print("\nVP7 CDS length distribution:")
-print(df["cds_length"].value_counts().sort_index())
+# df = pd.DataFrame(rows)
 
-print("\nRecords with unusual CDS lengths:")
+# print("\nQC review summary:")
+# print(df["qc_review"].value_counts())
 
-unusual_records = df[
-    (df["cds_length"].notna()) &
-    (df["cds_length"] != 981)
-]
+# print("\nRecords requiring QC review:")
+# print(
+#     df[df["qc_review"] == True][
+#         [
+#             "accession",
+#             "genotype",
+#             "sequence_length",
+#             "ambiguous_count",
+#             "frame_valid",
+#             "status"       
+#         ]
+#     ].to_string(index = False)
+# )
 
-print(
-    unusual_records[
-        ["accession", "genotype", "cds_length", "status"]
-    ].to_string(index = False)
-)
+# print("\nSequence QC summary:")
+# print(
+#     df[
+#         [
+#             "sequence_length",
+#             "ambiguous_count",
+#             "ambiguous_fraction",
+#             "frame_valid"
+#         ]
+#     ].describe(include = "all")
+# )
 
-raw_file = raw_dir / "rva_vp7_raw.gb"
+# print("\nSequences containing ambiguoous nucleotides:")
+# print(
+#     df[df["ambiguous_count"] > 0][
+#         ["accession", "genotype", "ambiguous_count"]
+#     ].to_string(index = False)
+# )
 
-with open(raw_file, "w") as handle:
-    SeqIO.write(records, handle, "genbank")
+# print(
+#     df[df["frame_valid"] == False][
+#         ["accession", "genotype", "sequence_length"]
+#     ].to_string(index = False)
+# )
 
-print(f"\nSaved raw records to {raw_file}")
+# print("\nRecord status:")
+# print(df["status"].value_counts())
 
-metadata_file = processed_dir / "rva_vp7_metadata.csv"
+# print("\nGenotype distribution:")
+# print(df["genotype"].value_counts())
 
-accepted_df = df[df["status"] == "accepted"]
+# print("\nVP7 CDS length distribution:")
+# print(df["cds_length"].value_counts().sort_index())
 
-accepted_df.to_csv(metadata_file, index = False)
+# print("\nRecords with unusual CDS lengths:")
 
-print(f"Saved {len(accepted_df)} accepted records.")
+# unusual_records = df[
+#     (df["cds_length"].notna()) &
+#     (df["cds_length"] != 981)
+# ]
 
-rejected_file = processed_dir / "rva_vp7_rejected.csv"
+# print(
+#     unusual_records[
+#         ["accession", "genotype", "cds_length", "status"]
+#     ].to_string(index = False)
+# )
 
-rejected_df = df[df["status"] != "accepted"]
+# raw_file = raw_dir / "rva_vp7_raw.gb"
 
-rejected_df.to_csv(rejected_file, index = False)
+# with open(raw_file, "w") as handle:
+#     SeqIO.write(records, handle, "genbank")
 
-print(f"Saved {len(rejected_df)} rejected records.")
+# print(f"\nSaved raw records to {raw_file}")
 
-fasta_file = processed_dir / "rva_vp7_sequences.fasta"
+# metadata_file = processed_dir / "rva_vp7_metadata.csv"
 
-accepted_accessions = set(accepted_df["accession"])
+# accepted_df = df[df["status"] == "accepted"]
 
-with open(fasta_file, "w") as handle:
-    for record in records:
-        if record.id not in accepted_accessions:
-            continue
+# accepted_df.to_csv(metadata_file, index = False)
 
-        vp7_cds = get_vp7_cds(record)
+# print(f"Saved {len(accepted_df)} accepted records.")
 
-        genotype = accepted_df.loc[
-            accepted_df["accession"] == record.id,
-            "genotype"
-        ].iloc[0]
+# rejected_file = processed_dir / "rva_vp7_rejected.csv"
 
-        handle.write(f">{record.id}|{genotype}\n")
-        handle.write(f"{str(vp7_cds)}\n")
+# rejected_df = df[df["status"] != "accepted"]
 
-print(f"Saved {len(accepted_accessions)} VP7 CDS sequences.")
+# rejected_df.to_csv(rejected_file, index = False)
 
-fasta_records = list(SeqIO.parse(fasta_file, "fasta"))
+# print(f"Saved {len(rejected_df)} rejected records.")
 
-print("\nFASTA validation:")
-print(f"Sequences: {len(fasta_records)}")
+# fasta_file = processed_dir / "rva_vp7_sequences.fasta"
 
-assert len(fasta_records) == len(accepted_df)
+# accepted_accessions = set(accepted_df["accession"])
 
-assert all(
-    len(record.seq) > 0
-    for record in fasta_records
-)
+# with open(fasta_file, "w") as handle:
+#     for record in records:
+#         if record.id not in accepted_accessions:
+#             continue
 
-print("FASTA validation passed.")
+#         vp7_cds = get_vp7_cds(record)
+
+#         genotype = accepted_df.loc[
+#             accepted_df["accession"] == record.id,
+#             "genotype"
+#         ].iloc[0]
+
+#         handle.write(f">{record.id}|{genotype}\n")
+#         handle.write(f"{str(vp7_cds)}\n")
+
+# print(f"Saved {len(accepted_accessions)} VP7 CDS sequences.")
+
+# fasta_records = list(SeqIO.parse(fasta_file, "fasta"))
+
+# print("\nFASTA validation:")
+# print(f"Sequences: {len(fasta_records)}")
+
+# assert len(fasta_records) == len(accepted_df)
+
+# assert all(
+#     len(record.seq) > 0
+#     for record in fasta_records
+# )
+
+# print("FASTA validation passed.")
 
