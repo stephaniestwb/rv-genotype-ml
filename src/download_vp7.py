@@ -1,8 +1,9 @@
 from Bio import Entrez, SeqIO
-import re
-import pandas as pd
+from pathlib import Path
+from collections import Counter
+import os
 
-Entrez.email = "stampwberth.1@osu.edu"
+Entrez.email = os.environ["NCBI_EMAIL"]
 
 query = (
     '"Rotavirus A"[Organism] '
@@ -10,220 +11,322 @@ query = (
     'AND "complete cds"[Title] '
 ) 
 
-handle = Entrez.esearch(
-    db = "nucleotide",
-    term = query,
-    retmax = 10000
-)
+batch_size = 200
 
-results = Entrez.read(handle)
-handle.close()
+raw_dir = Path("data/raw")
+raw_dir.mkdir(parents = True, exist_ok = True)
 
-all_ids = results["IdList"]
+def search_ncbi(query):
+    """Search NCBI and store the results in Web History."""
 
-sample_positions = [
-    0,
-    100,
-    500,
-    1000,
-    2000,
-    3000,
-    4000,
-    5000,
-    6000,
-    7000,
-    8000,
-    9000,
-    9999,
-]
+    print("Searching NCBI...")
 
-sample_ids = [all_ids[i] for i in sample_positions]
+    with Entrez.esearch(
+        db = "nucleotide",
+        term = query,
+        usehistory = "y",
+        retmax = 0
+    ) as handle:
+        results = Entrez.read(handle)
 
-print("Search query:")
-print(query)
+    count = int(results["Count"])
+    webenv = results["WebEnv"]
+    query_key = results["QueryKey"]
 
-print("\nNumber of matching records:")
-print(results["Count"])
-
-print("\nSampled NCBI IDs:")
-for position, ncbi_id in zip(sample_positions, sample_ids):
-    print(f"Position {position}: {ncbi_id}")
-
-def get_source_qualifiers(record):
-    """Return the qualifiers from a GenBank source feature."""
-
-    for feature in record.features:
-        if feature.type == "source":
-            return feature.qualifiers
+    print(f"Found {count} candidate records.")
     
-    return {}
+    return count, webenv, query_key
 
-def get_first(qualifiers, key):
-    """Return the first value for a qualifier, or None if absent"""
+def fetch_accessions(webenv, query_key, count):
+    """Retrieve the accession numbers from an NCBI search."""
 
-    values = qualifiers.get(key)
+    print("\nRetrieving accession list...")
 
-    if values: 
-        return values[0]
-    
-    return None
+    accessions = []
 
-def extract_g_genotype(record, source):
-    """
-    Extract the RVA G genotype.
-
-    Multiple annotation fields are searched. All detected G genotypes
-    must agree for the record to be accepted.
-    """
-
-    candidates = [
-        get_first(source, "serotype"),
-        get_first(source, "genotype"),
-        get_first(source, "isolate"),
-        get_first(source, "strain"),
-        get_first(source, "note"),
-        record.description,
-    ]
-
-    # Also inspect relevant CDS annotations
-    for feature in record.features:
-        if feature.type == "CDS":
-            candidates.extend([
-                get_first(feature.qualifiers, "note"),
-                get_first(feature.qualifiers, "gene"),
-                get_first(feature.qualifiers, "product"),
-            ])
-
-    genotypes = set()
-
-    for text in candidates:
-        if not text:
-            continue
-
-        matches = re.findall(
-            r"\bG(\d+)(?=P|\b)", 
-            text,
-            flags = re.IGNORECASE
+    for start in range(0, count, batch_size):
+        current_batch_size = min(
+            batch_size,
+            count - start
         )
 
-        for number in matches:
-            genotypes.add(f"G{number}")
+        with Entrez.esummary(
+            db = "nucleotide",
+            retstart = start,
+            retmax = current_batch_size,
+            retmode = "xml",
+            webenv = webenv,
+            query_key = query_key
+        ) as handle:
+            results = Entrez.read(handle)
 
-    if len(genotypes) == 1:
-        return genotypes.pop(), "accepted"
+        batch_accessions = [
+            record["AccessionVersion"]
+            for record in results
+        ]
 
-    if len(genotypes) == 0:
-        return None, "genotype_not_found"
-    
-    return None, "conflicting_genotypes"
+        if len(batch_accessions) != current_batch_size:
+            raise RuntimeError(
+                f"Expected {current_batch_size} accessions"
+                f"at position {start}, "
+                f"but received {len(batch_accessions)}."
+            )
 
-def get_vp7_cds(record):
-    """Extract the nucleotide sequence of the annotated VP7 CDS."""
+        accessions.extend(batch_accessions)
 
-    for feature in record.features:
-        if feature.type != "CDS":
-            continue
+        print(f"Retrieved {len(accessions)} of {count} accessions.")
 
-        gene = get_first(feature.qualifiers, "gene")
-        product = get_first(feature.qualifiers, "product")
+        time.sleep(0.4)
 
-        gene_is_vp7 = gene and gene.upper() == "VP7"
-        product_is_vp7 = product and "VP7" in product.upper()
+    return accessions
 
-        if gene_is_vp7 or product_is_vp7:
-            return feature.extract(record.seq)
-    
-    return None
+def save_manifest(accessions):
+    """Save and validate the accession manifest."""
 
-def parse_record(record):
-    """Convert one GenBank record into structured metadata."""
+    manifest_file = Path("data/manifests/vp7_accessions.txt")
+    manifest_file.parent.mkdir(parents = True, exist_ok = True)
 
-    source = get_source_qualifiers(record)
+    if len(accessions) != len(set(accessions)):
+        raise ValueError(
+            "Duplicate accessions found in the manifest."
+        )
 
-    vp7_cds = get_vp7_cds(record)
-
-    genotype, genotype_status = extract_g_genotype(record, source)
-
-    if vp7_cds is None:
-        status = "vp7_cds_not_found"
-    elif genotype_status != "accepted":
-        status = genotype_status
-    else:
-        status = "accepted"
+    with open(manifest_file, "w") as handle:
         
-    return {
-        "accession": record.id,
-        "genotype": genotype,
-        "status": status,
-        "record_length": len(record.seq),
-        "cds_length": len(vp7_cds) if vp7_cds is not None else None,
-        "organism": record.annotations.get("organism"),
-        "host": get_first(source, "host"),
-        "country": get_first(source, "geo_loc_name"),
-        "collection_date": get_first(source, "collection_date"),
-        "isolate": get_first(source, "isolate"),
-        "strain": get_first(source, "strain"),
-        "serotype": get_first(source, "serotype"),
-        "description": record.description,
+        for accession in accessions:
+            handle.write(f"{accession}\n")
+
+    print(f"\nSaved {len(accessions)} accessions.")
+    print(f"Manifest: {manifest_file}")
+    
+    return manifest_file
+
+def load_manifest():
+    """Load the saved accession manifest."""
+
+    manifest_file = Path("data/manifests/vp7_accessions.txt")
+    manifest_file.parent.mkdir(parents = True, exist_ok = True)
+
+    with open(manifest_file, "r") as handle:
+        accessions = [
+            line.strip()
+            for line in handle
+            if line.strip()
+        ]
+
+    return accessions
+
+def compare_existing_records(accessions, records):
+    """Compare downloaded records agains the manifest"""
+
+    manifest_set = set(accessions)
+
+    downloaded_set = {
+        record.id
+        for record in records
     }
 
-def print_failed_record(record):
-    """Print useful annotations for records with no confident genotype."""
+    existing = manifest_set & downloaded_set
+    missing = manifest_set - downloaded_set
+    outdated = downloaded_set - manifest_set
 
-    source = get_source_qualifiers(record)
+    print("\nAccession comparison:")
+    print(f"Manifest accessions: {len(manifest_set)}")
+    print(f"Downloaded accessions: {len(downloaded_set)}")
+    print(f"Already available: {len(existing)}")
+    print(f"Still missing: {len(missing)}")
+    print(f"Not in manifest: {len(outdated)}")
 
-    genotype, status = extract_g_genotype(record, source)
+    return existing, missing, outdated
 
-    if status != "accepted":
-        print("\n" + "=" * 80)
-        print("FAILED RECORD")
-        print("Accession:", record.id)
-        print("Status:", status)
-        print("Description:", record.description)
+def fetch_records_by_accession(accessions):
+    """Retrieve GenBank records using accession numbers."""
 
-        print("\nRelevant source qualifiers:")
-    
-    
-    return
+    with Entrez.efetch(
+        db = "nucleotide",
+        id = ",".join(accessions),
+        rettype = "gb",
+        retmode = "text"
+    ) as handle:
 
-print("\nFetching sampled GenBank records...\n")
+        records = list(SeqIO.parse(handle, "genbank"))
 
-fetch_handle = Entrez.efetch(
-    db = "nucleotide",
-    id = ",".join(sample_ids),
-    rettype = "gb",
-    retmode = "text"
-)
+    return records
 
-records = list(SeqIO.parse(fetch_handle, "genbank"))
-fetch_handle.close()
+def fetch_with_retries(accessions, max_attempts = 3):
+    """Retrieve records, retrying after temporary failures."""
 
-rows = []
+    for attempt in range(1, max_attempts + 1):
+        try:
+            records = fetch_records_by_accession(accessions)
 
-for record in records:
-    rows.append(parse_record(record))
+            requested = set(accessions)
+            returned = [record.id for record in records]
 
-df = pd.DataFrame(rows)
+            if (
+                len(returned) != len(requested)
+                or set(returned) != requested
+            ):
+                raise RuntimeError(
+                    "Returned accessions do not match the request."
+                )
 
-print("\nParsed records:\n")
+            return records
 
-print(
-    df[
-        [
-            "accession",
-            "genotype",
-            "status",
-            "record_length",
-            "cds_length",
-            "host",
-            "country",
-            "collection_date",
-            "serotype",
+        except Exception as error:
+            print(
+                f"Attempt {attempt}/{max_attempts} "
+                f"failed: {error}"
+            )
+
+            if attempt == max_attempts:
+                raise
+
+            wait_time = 2 ** attempt
+
+            print(f"Retrying in {wait_time} seconds...")
+            time.sleep(wait_time)
+
+def download_missing_records(missing, max_batches = None):
+    """Download missing GenBank records in validated batches."""
+
+    missing_accessions = sorted(missing)
+
+    total = len(missing_accessions)
+
+    existing_batches = list(
+        raw_dir.glob("accession_batch_*.gb")
+    )
+
+    next_batch_number = max(
+        (
+            int(path.stem.split("_")[-1])
+            for path in existing_batches
+        ),
+        default = -1
+    ) + 1
+
+    print(f"Next batch number: {next_batch_number}")
+
+    print(f"\nDownloading {total} missing records...")
+
+    for start in range(0, total, batch_size):
+        batch_index = start // batch_size
+
+        if max_batches is not None and batch_index >= max_batches:
+            break
+
+        batch_number = next_batch_number + batch_index
+
+        batch_accessions = missing_accessions[
+            start:start + batch_size
         ]
-    ].to_string(index = False)
-)
 
-print("\nInspecting failed records:")
+        print(
+            f"\nBatch {batch_number + 1}: "
+            f"requesting {len(batch_accessions)} records..."
+        )
 
-for record in records:
-    print_failed_record(record)
+        records = fetch_with_retries(
+            batch_accessions
+        )
+
+        requested = set(batch_accessions)
+
+        returned = [record.id for record in records]
+
+        if (
+            len(returned) != len(requested)
+            or set(returned) != requested
+        ): 
+            raise RuntimeError(
+                f"Batch {batch_number + 1} validation failed."
+            )
+
+        batch_file = raw_dir / (
+            f"accession_batch_{batch_number:05d}.gb"
+        )
+
+        if batch_file.exists():
+            raise FileExistsError(
+                f"Refusing to overwrite {batch_file}"
+            )
+
+        temporary_file = batch_file.with_suffix(".gb.tmp")
+
+        with open(temporary_file, "w") as handle:
+            SeqIO.write(records, handle, "genbank")
+
+        temporary_file.replace(batch_file)
+
+        print(
+            f"Saved {len(records)} records "
+            f"to {batch_file}"  
+        )
+
+        time.sleep(0.4)
+
+    print("\nDownload run completed.")
+
+def load_batches():
+    """Load all downloaded GenBank batches."""
+
+    records = []
+
+    batch_files = sorted(
+        list(raw_dir.glob("batch_*.gb"))
+        + list(raw_dir.glob("accession_batch_*.gb"))
+        )
+
+    for batch_file in batch_files:
+        print(f"Loading {batch_file}...")
+
+        with open(batch_file, "r") as handle:
+            batch_records = list(SeqIO.parse(handle, "genbank"))
+
+        records.extend(batch_records)
+
+    print(f"\nLoaded {len(records)} records.")
+
+    return records
+
+def validate_database(accessions, records):
+    """Validate downloaded records against the manifest."""
+
+    manifest_set = set(accessions)
+
+    record_ids = [record.id for record in records]
+    downloaded_set = set(record_ids)
+
+    counts = Counter(record_ids)
+
+    duplicates = {
+        accession: count
+        for accession, count in counts.items()
+        if count > 1
+    }
+
+    missing = manifest_set - downloaded_set
+    unexpected = downloaded_set - manifest_set
+
+    print("\nDatabase integrity report:")
+    print(f"Manifest entries {len(accessions)}")
+    print(f"Loaded records: {len(records)}")
+    print(f"Unique records: {len(downloaded_set)}")
+    print(f"Duplicate accessions: {len(duplicates)}")
+    print(f"Missing accessions: {len(missing)}")
+    print(f"Unexpected accessions: {len(unexpected)}")
+
+    assert len(accessions) == len(manifest_set)
+    assert len(records) == len(accessions)
+    assert not duplicates
+    assert not missing
+    assert not unexpected
+
+    print("\nDatabase integrity check passed.")
+
+if __name__ == "__main__":
+
+    accessions = load_manifest()
+    records = load_batches()
+    validate_database(accessions, records)
