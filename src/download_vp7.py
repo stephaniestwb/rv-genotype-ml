@@ -1,7 +1,8 @@
-from Bio import Entrez, SeqIO
-from pathlib import Path
-from collections import Counter
 import os
+import time
+from pathlib import Path
+from Bio import Entrez, SeqIO
+from collections import Counter
 
 Entrez.email = os.environ["NCBI_EMAIL"]
 
