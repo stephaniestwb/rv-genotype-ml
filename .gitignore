@@ -26,9 +26,6 @@ data/raw/*
 data/processed/*
 !data/processed/.gitkeep
 
-# Test scripts
-tests/
-
 # Environment variables and private configuration
 .env
 .env.*
