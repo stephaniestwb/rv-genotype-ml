@@ -8,8 +8,6 @@ from sequence_qc import check_sequence
 raw_dir = Path("data/raw")
 processed_dir = Path("data/processed")
 
-processed_dir.mkdir(parents = True, exist_ok = True)
-
 def load_records():
     """Load all downloaded GenBank batches."""
 
@@ -31,6 +29,39 @@ def load_records():
     print(f"\nLoaded {len(records)} records.")
 
     return records
+
+def validate_records(records, manifest_path = Path("data/manifests/vp7_accessions.txt")):
+    """Validate loaded records agains the frozen accession manifest."""
+
+    with open(manifest_path, "r") as handle:
+        expected = [
+            line.strip()
+            for line in handle 
+            if line.strip()
+        ]
+
+    observed = [record.id for record in records]
+
+    expected_set = set(expected)
+    observed_set = set(observed)
+
+    missing = expected_set - observed_set
+    unexpected = observed_set - expected_set
+
+    if len(expected) != len(expected_set):
+        raise ValueError("Duplicate accession found in manifest.")
+
+    if len(observed) != len(observed_set):
+        raise ValueError("Duplicate accessions found in loaded records.")
+
+    if missing or unexpected:
+        raise ValueError(
+            f"Dataset mismatch: "
+            f"{len(missing)} missing, "
+            f"{len(unexpected)} unexpected accessions"
+        )
+
+    print(f"Validated {len(observed)} records against the frozen accession manifest.")
 
 def process_records(records):
     """Extract metadata and calculate VP7 sequence QC metrics."""
@@ -75,6 +106,8 @@ def generate_qc_report(df):
 def save_metadata(df):
     """Save the preliminary metadata and QC table."""
 
+    processed_dir.mkdir(parents = True, exist_ok = True)
+
     output_file = (processed_dir / "rva_vp7_all_metadata.csv")
 
     df.to_csv(output_file, index = False)
@@ -84,7 +117,7 @@ def save_metadata(df):
 if __name__ == "__main__":
 
     records = load_records()
-    assert len(records) == 10096
+    validate_records(records)
 
     print("\nProcessing records.")
 
