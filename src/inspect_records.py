@@ -2,7 +2,17 @@ import pandas as pd
 from Bio.Seq import Seq
 
 from build_database import load_records
-from vp7_parser import  get_source_qualifiers, extract_g_genotype
+
+from vp7_parser import  (
+    get_source_qualifiers, 
+    extract_g_genotype,
+    find_vp7_features
+    )
+from sequence_qc import (
+    check_vp7_annotation,
+    check_vp7_cds_integrity, 
+    evaluate_vp7_cds
+    )
 
 def inspect_unsual_lengths(df):
     """Display records with unusually short or long VP7 CDS."""
@@ -140,34 +150,58 @@ def inspect_cds_boundary(record):
             amino_acid = codon.translate()
             print(f"{position}: {codon} -> {amino_acid}")
 
+def inspect_all_qualifiers(record):
+    """Display all qualifiers associated with each GenBank feature."""
+
+    print(f"\nFull annotation inspection: {record.id}")
+
+    for feature in record.features:
+        print(f"\nFeature: {feature.type}")
+        print(f"Location: {feature.location}")
+
+        for key, values in feature.qualifiers.items():
+
+            if key == "translation":
+                print(f"translation: {len(values[0])} amino acids")
+
+            else: 
+                print(f"{key}: {values}")
+
 if __name__ == "__main__":
 
     df = pd.read_csv("data/processed/rva_vp7_all_metadata.csv")
 
     unusual = inspect_unsual_lengths(df)
 
-    accessions_to_inspect = {
+    records = load_records()
+
+    multiple_candidates = []
+
+    for record in records:
+        matches = find_vp7_features(record)
+
+        if len(matches) > 1:
+            multiple_candidates.append((record.id, len(matches)))
+
+    print(f"\nRecords with multiple VP7 CDS candidates: {len(multiple_candidates)}")
+
+    for accession, count in multiple_candidates[:20]:
+        print(f"{accession}: {count} candidate features")
+
+    test_accessions = {
         "D86277.1",
         "MH829417.1",
         "KP170758.1",
     }
 
-    records = load_records()
-
     for record in records:
-        if record.id == "D86277.1":
-
-            inspect_cds_boundary(record)
-
-            # Inspect the annotated VP7 CDS
+        if record.id in test_accessions:
             for feature in record.features:
                 if feature.type == "CDS":
-                    cds = feature.extract(record.seq)
 
-                    print(f"\nAnnotated CDS inspection:")
-                    print(f"CDS first 15 nt: {cds[:15]}")
-                    print(f"CDS last 15 nt: {cds[-15:]}")
-                    print(f"First codon: {cds[:3]}")
-                    print(f"Last codon: {cds[-3:]}")
+                    report = evaluate_vp7_cds(record, feature)
 
-                    
+                    print(f"\nQC report: {record.id}")
+
+                    for key, value in report.items():
+                        print(f"{key}: {value}")

@@ -68,8 +68,10 @@ def extract_g_genotype(record, source):
     
     return None, "conflicting_genotypes"
 
-def get_vp7_cds(record):
-    """Extract the nucleotide sequence of the annotated VP7 CDS."""
+def find_vp7_features(record):
+    """Return all CDS features annotated as VP7."""
+
+    matches = []
 
     for feature in record.features:
         if feature.type != "CDS":
@@ -82,9 +84,31 @@ def get_vp7_cds(record):
         product_is_vp7 = product and "VP7" in product.upper()
 
         if gene_is_vp7 or product_is_vp7:
-            return feature.extract(record.seq)
-    
+            matches.append(feature)
+
+    return matches
+
+
+def get_vp7_feature(record):
+    """Return the first CDS feature annotated as VP7."""
+
+    matches = find_vp7_features(record)
+
+    if len(matches) == 1:
+        return matches[0]
+
     return None
+
+def get_vp7_cds(record):
+    """Extract the nucleotide sequence of the selected VP7 CDS."""
+
+    feature = get_vp7_feature(record)
+
+    if feature is None:
+        return None
+
+    return feature.extract(record.seq)
+
 
 def parse_record(record):
     """Convert one GenBank record into structured metadata."""
