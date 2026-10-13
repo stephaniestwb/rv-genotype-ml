@@ -1,51 +1,90 @@
 import pandas as pd
 
-metadata = pd.read_csv("data/processed/rva_vp7_all_metadata.csv")
+def merge_metadata_qc(metadata, qc):
+    """
+    Merge VP7 metadata and sequence QC results by accession.
 
-qc = pd.read_csv("data/processed/rva_vp7_qc_report.csv")
+    Preserve records without VP7 CDS features, but reject 
+    unexpected missing QC results.
+    """
 
-print("Metadata columns")
-print(metadata.columns.tolist())
+    # Check unique accessions
+    if metadata["accession"].duplicated().any():
+        raise ValueError("Duplicate accessions in metadata.")
 
-print("\nQC columns:")
-print(qc.columns.tolist())
+    if qc["accession"].duplicated().any():
+        raise ValueError("Duplicate accessions in QC report.")
 
-# Check whether accession identifiers are unique
-print("\nDuplicate accessions in metadata:")
-print(metadata["accession"].duplicated().sum())
-
-print("\nDuplicate accessions in QC report:")
-print(qc["accession"].duplicated().sum())
-
-# Merge QC results with metadata
-merged = metadata.merge(
-    qc,
-    on = "accession",
-    how = "left", 
-    validate = "one_to_one",
-    indicator = True
+    # Merge QC results with metadata
+    merged = metadata.merge(
+        qc,
+        on = "accession",
+        how = "left", 
+        validate = "one_to_one",
+        indicator = True
     )
 
-print("\nMerge results:")
-print(merged["_merge"].value_counts())
+    unmatched = merged["_merge"].eq("left_only")
+    unexpected_missing = (unmatched & ~merged["status"].eq("vp7_cds_not_found"))
 
-# Identify sequences meeting both preliminary requirements
-merged["preliminary_eligible"] = (
-    merged["status"].eq("accepted")
-    & merged["qc_pass"].eq(True)
-)
+    if unexpected_missing.any():
+        accessions = merged.loc[unexpected_missing, "accession"].tolist()
 
-print("\nPreliminary training eligibility:")
-print(merged["preliminary_eligible"].value_counts())
+        raise ValueError(f"Unexpected missing QC results: {accessions}")
 
-print("\nEligible sequences by genotype:")
-print(
-    merged.loc[
-        merged["preliminary_eligible"],
-        "genotype"
-    ].value_counts()
-)
+    return merged
 
-merged.to_csv("data/processed/rva_vp7_merged_qc.csv", index = False)
+def assign_preliminary_eligibility(merged):
+    """
+    Identify sequences meeting preliminary trianing requirements.
 
-print("\nMerged QC report saved.")
+    Requirements:
+    1. A single accepted G genotype.
+    2. Passing VP7 sequence QC.
+    """
+
+    merged = merged.copy()
+
+    merged["preliminary_eligible"] = (
+        merged["status"].eq("accepted")
+        & merged["qc_pass"].eq(True)
+    )
+
+    return merged
+
+if __name__ == "__main__":
+    
+    metadata = pd.read_csv("data/processed/rva_vp7_all_metadata.csv")
+    qc = pd.read_csv("data/processed/rva_vp7_qc_report.csv")
+
+    print("Metadata columns")
+    print(metadata.columns.tolist())
+
+    print("\nQC columns:")
+    print(qc.columns.tolist())
+
+    merged = merge_metadata_qc(metadata, qc)
+
+    print("\nMerge results:")
+    print(merged["_merge"].value_counts())
+
+    merged = assign_preliminary_eligibility(merged)
+
+    print("\nPreliminary training eligibility:")
+    print(merged["preliminary_eligible"].value_counts())
+
+    print("\nEligible sequences by genotype:")
+    print(
+        merged.loc[
+            merged["preliminary_eligible"],
+            "genotype"
+        ].value_counts()
+    )
+
+    output_path = "data/processed/rva_vp7_merged_qc.csv"
+
+    merged.to_csv("data/processed/rva_vp7_merged_qc.csv", index = False)
+
+    print("\nMerged QC report saved.")
+
+
