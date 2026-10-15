@@ -114,21 +114,18 @@ class TestAnalyzeDuplicates(unittest.TestCase):
                 "accession": "TEST001.1",
                 "genotype": "G3",
                 "status": "accepted",
-                # "sequence": self.seq_a,
                 "sequence_hash": shared_hash,  
             },
             {
                 "accession": "TEST002.1",
                 "genotype": "G4",
                 "status": "accepted",
-                # "sequence": self.seq_c,
                 "sequence_hash": shared_hash,
             },
             {
                 "accession": "TEST003.1",
                 "genotype": None,
                 "status": "genotype_not_found",
-                # "sequence": self.seq_c,
                 "sequence_hash": shared_hash,
             },
         ]
