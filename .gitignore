@@ -1,3 +1,6 @@
+# Generated and downloaded datasets are excluded from version control.
+# Reproduce these files using the sripts documented in README.md
+
 # Python virtual environment
 .venv/
 
@@ -43,3 +46,21 @@ data/processed/*
 # Generated figures
 results/figures/*
 !results/figures/.gitkeep
+
+# Python build and packaging artifacts
+build/
+dsit/
+*.egg-info/
+
+# Coverage reports
+.coverage
+.coverage.*
+htmlcov/
+
+# Local Python configuration
+.python-version
+
+# Temporary and backup files
+*.bak 
+*.swp
+*~
