@@ -90,7 +90,7 @@ def find_vp7_features(record):
 
 
 def get_vp7_feature(record):
-    """Return the first CDS feature annotated as VP7."""
+    """Return the VP7 CDS feature only when one match exists."""
 
     matches = find_vp7_features(record)
 
